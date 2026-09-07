@@ -1,0 +1,6 @@
+{
+  "name": "SocialPulse AI",
+  "description": "An AI-powered social media management dashboard. Generate viral image posts, create short video reels (Veo), draft personalized birthday wishes, and get engagement strategies using Gemini 3.1 Pro.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
