@@ -35,10 +35,13 @@ async function startServer() {
 
   const extractJson = (text: string) => {
     try {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) return JSON.parse(jsonMatch[0]);
-      return JSON.parse(text);
+      const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+      return JSON.parse(cleaned);
     } catch (e) {
+      try {
+        const match = text.match(/\[[\s\S]*\]|\{[\s\S]*\}/);
+        if (match) return JSON.parse(match[0]);
+      } catch (e2) {}
       throw new Error("AI response was not in a valid format. Please try again.");
     }
   };
@@ -75,6 +78,28 @@ async function startServer() {
       }
     } catch (e: any) {
       console.error(e);
+      const errorStr = e.message || String(e);
+      if (errorStr.includes("429") || errorStr.includes("Quota") || errorStr.includes("RESOURCE_EXHAUSTED")) {
+        console.warn("Gemini TTS quota exceeded, falling back to free Google Translate TTS");
+        try {
+          const { script } = req.body;
+          const fullText = script.map((s: any) => s.text).join(' ');
+          const googleTTS = require('google-tts-api');
+          const results = await googleTTS.getAllAudioBase64(fullText, {
+            lang: 'th',
+            slow: false,
+            host: 'https://translate.google.com',
+          });
+          
+          if (results && results.length > 0) {
+            const allMp3Buffers = results.map((r: any) => Buffer.from(r.base64, 'base64'));
+            const finalMp3Buffer = Buffer.concat(allMp3Buffers);
+            return res.json({ audioData: `data:audio/mp3;base64,${finalMp3Buffer.toString('base64')}` });
+          }
+        } catch (fallbackError) {
+          console.error("Fallback TTS failed", fallbackError);
+        }
+      }
       res.status(500).json({ error: e.message || String(e) });
     }
   });
@@ -310,6 +335,174 @@ Ensure the tone is engaging, educational, and natural.
       const { name, relationship, style } = req.body;
       const response = await safeGenerateContent({ contents: `Wish for ${name}, ${relationship}, ${style} in Thai.` });
       res.json({ text: response.text || "" });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  });
+
+  
+  
+  app.post('/api/gemini/movie-pitches', async (req, res) => {
+    try {
+      const { style, genre, length } = req.body;
+      const response = await safeGenerateContent({
+        contents: `Create 3 movie concept pitches. Style: ${style}. Genre: ${genre}. Length: ${length}.
+        Respond strictly in JSON format as an array of objects, each containing:
+        - title (string)
+        - synopsis (string, max 3 lines)
+        - ending (string, brief explanation of how the story concludes)
+        Example: [ { "title": "...", "synopsis": "...", "ending": "..." } ]`,
+        config: { responseMimeType: "application/json" }
+      });
+      res.json(extractJson(response.text || "[]"));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  });
+
+  
+  app.post('/api/gemini/movie-characters', async (req, res) => {
+    try {
+      const { pitch, style } = req.body;
+      // 1. Generate text details
+      const textRes = await safeGenerateContent({
+        contents: `Based on this movie pitch: Title: "${pitch.title}", Synopsis: "${pitch.synopsis}".
+        Generate the main characters for this movie.
+        Respond strictly in JSON format as an array of objects:
+        - id (string, unique like char_1)
+        - name (string)
+        - role (string, e.g., Protagonist, Antagonist, Sidekick)
+        - description (string, appearance and personality)
+        - voiceStyle (string, e.g., Deep and raspy, High and energetic)
+        - prompt (string, a highly detailed prompt to generate a portrait image of this character in "${style}" style)
+        Example: [ { "id": "c1", "name": "...", "role": "...", "description": "...", "voiceStyle": "...", "prompt": "..." } ]`,
+        config: { responseMimeType: "application/json" }
+      });
+      const characters = extractJson(textRes.text || "[]");
+      
+      // 2. Generate images for each character
+      const charsWithImages = await Promise.all(characters.map(async (char: any) => {
+         try {
+            const imgRes = await safeGenerateContent({
+               model: IMAGE_MODEL,
+               contents: `Portrait of ${char.name}. ${char.prompt}. Style: ${style}. ${CAMERA_SPECS}`,
+               config: { imageConfig: { aspectRatio: "1:1" } }
+            });
+            let imageUrl = null;
+            for (const part of imgRes.candidates?.[0]?.content?.parts || []) {
+               if (part.inlineData) {
+                  imageUrl = `data:image/png;base64,${part.inlineData.data}`;
+               }
+            }
+            return { ...char, imageUrl };
+         } catch(e) {
+            console.error("Failed to generate image for char", char.name);
+            return { ...char, imageUrl: null };
+         }
+      }));
+
+      res.json(charsWithImages);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  });
+
+  app.post('/api/gemini/movie-character-regen', async (req, res) => {
+    try {
+       const { char, style, uploadedFace } = req.body;
+       const contents = {
+          parts: [
+            { text: `Generate a portrait of ${char.name}. ${char.prompt}. Style: ${style}. MAKE SURE THE FACE MATCHES THE PROVIDED IMAGE EXACTLY. ${CAMERA_SPECS}` }
+          ]
+       } as any;
+
+       if (uploadedFace) {
+          contents.parts.unshift({
+             inlineData: { mimeType: 'image/png', data: uploadedFace.split(',')[1] }
+          });
+       }
+
+       const imgRes = await safeGenerateContent({
+          model: IMAGE_MODEL,
+          contents,
+          config: { imageConfig: { aspectRatio: "1:1" } }
+       });
+       let imageUrl = null;
+       for (const part of imgRes.candidates?.[0]?.content?.parts || []) {
+          if (part.inlineData) imageUrl = `data:image/png;base64,${part.inlineData.data}`;
+       }
+       res.json({ imageUrl });
+    } catch (e: any) {
+       res.status(500).json({ error: e.message || String(e) });
+    }
+  });
+
+  app.post('/api/gemini/movie-scenes', async (req, res) => {
+    try {
+      const { pitch, characters } = req.body;
+      const response = await safeGenerateContent({
+        contents: `Based on the movie "${pitch.title}" and characters: ${JSON.stringify(characters.map(c => c.name))}.
+        Create the first 3 detailed scenes (to avoid token limits, we just do 3 scenes for this demo).
+        Respond strictly in JSON format as an array of objects:
+        - id (string, unique like s_1)
+        - sceneNumber (number)
+        - location (string)
+        - action (string, detailed visual action for video generation)
+        - dialog (string, actual spoken words by characters, or "None" if action only)
+        - speakingCharacterId (string, id of character speaking, or null)
+        - emotion (string, the mood/emotion for voice and face)
+        Example: [ { "id": "s1", "sceneNumber": 1, "location": "...", "action": "...", "dialog": "...", "speakingCharacterId": "c1", "emotion": "Angry" } ]`,
+        config: { responseMimeType: "application/json" }
+      });
+      res.json(extractJson(response.text || "[]"));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  });
+
+  app.post('/api/gemini/video-pitches', async (req, res) => {
+    try {
+      const { style, genre } = req.body;
+      const response = await safeGenerateContent({
+        contents: `Create 5 short video concept pitches. Style: ${style}. Genre: ${genre}.
+        Respond strictly in JSON format as an array of objects, each containing:
+        - title (string)
+        - synopsis (string, max 3 lines)
+        Example: [ { "title": "...", "synopsis": "..." }, ... ]`,
+        config: { responseMimeType: "application/json" }
+      });
+      res.json(extractJson(response.text || "[]"));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  });
+
+  app.post('/api/gemini/video-script', async (req, res) => {
+    try {
+      const { pitch, style } = req.body;
+      const response = await safeGenerateContent({
+        contents: `You are an expert film director and screenwriter. 
+        Expand the following video pitch into a detailed full scene-by-scene script.
+        Pitch Title: ${pitch.title}
+        Pitch Synopsis: ${pitch.synopsis}
+        Visual Style: ${style}
+        
+        Provide the response strictly in JSON format matching this structure:
+        {
+          "characters": [ { "name": "...", "description": "..." } ],
+          "scenes": [
+            {
+              "sceneNumber": 1,
+              "location": "...",
+              "action": "...",
+              "cameraAngle": "...",
+              "emotionAndDetails": "..."
+            }
+          ]
+        }`,
+        config: { responseMimeType: "application/json" }
+      });
+      res.json(extractJson(response.text || "{}"));
     } catch (e: any) {
       res.status(500).json({ error: e.message || String(e) });
     }

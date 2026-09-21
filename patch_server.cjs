@@ -1,56 +1,63 @@
 const fs = require('fs');
 let code = fs.readFileSync('server.ts', 'utf-8');
 
-const podcastEndpoint = `
-  app.post('/api/gemini/podcast-script', async (req, res) => {
+const newEndpoints = `
+  app.post('/api/gemini/video-pitches', async (req, res) => {
     try {
-      const { text, focus, length, hosts, fileData, fileMime } = req.body;
-      let parts = [];
-      if (fileData && fileMime) {
-        parts.push({
-          inlineData: {
-            data: fileData.split(',')[1] || fileData,
-            mimeType: fileMime
-          }
-        });
-      }
-      if (text) {
-        parts.push({ text: \`Source material/URL: \${text}\` });
-      }
-      
-      const prompt = \`
-You are an expert podcast producer. Analyze the provided source material and write a highly engaging podcast script.
-Focus/Direction: \${focus || "General overview"}
-Length constraint: \${length === 'short' ? '3-5 minutes (approx 500 words)' : length === 'medium' ? '10-15 minutes (approx 1500 words)' : 'Deep dive 20+ minutes (approx 3000 words)'}
-Hosts: \${hosts === 2 ? '2 Hosts (Host 1 and Host 2 having a dynamic conversation)' : '1 Host (Host 1 giving a solo deep-dive)'}
-
-Return the script strictly as a JSON array of objects with exactly two fields:
-"speaker": either "Host 1" or "Host 2"
-"text": the dialogue text for that segment. (Keep each segment reasonably concise).
-Ensure the tone is engaging, educational, and natural.
-\`;
-      parts.push({ text: prompt });
-
-      const textRes = await safeGenerateContent({
-        contents: [{ role: "user", parts }],
-        config: { 
-          responseMimeType: "application/json",
-          thinkingConfig: { thinkingBudget: 4000 }
-        }
+      const { style, genre } = req.body;
+      const response = await safeGenerateContent({
+        contents: \`Create 5 short video concept pitches. Style: \${style}. Genre: \${genre}.
+        Respond strictly in JSON format as an array of objects, each containing:
+        - title (string)
+        - synopsis (string, max 3 lines)
+        Example: [ { "title": "...", "synopsis": "..." }, ... ]\`,
+        config: { responseMimeType: "application/json" }
       });
-      
-      const data = extractJson(textRes.text || "[]");
-      res.json(Array.isArray(data) ? data : []);
+      res.json(extractJson(response.text || "[]"));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  });
+
+  app.post('/api/gemini/video-script', async (req, res) => {
+    try {
+      const { pitch, style } = req.body;
+      const response = await safeGenerateContent({
+        contents: \`You are an expert film director and screenwriter. 
+        Expand the following video pitch into a detailed full scene-by-scene script.
+        Pitch Title: \${pitch.title}
+        Pitch Synopsis: \${pitch.synopsis}
+        Visual Style: \${style}
+        
+        Provide the response strictly in JSON format matching this structure:
+        {
+          "characters": [ { "name": "...", "description": "..." } ],
+          "scenes": [
+            {
+              "sceneNumber": 1,
+              "location": "...",
+              "action": "...",
+              "cameraAngle": "...",
+              "emotionAndDetails": "..."
+            }
+          ]
+        }\`,
+        config: { responseMimeType: "application/json" }
+      });
+      res.json(extractJson(response.text || "{}"));
     } catch (e: any) {
       res.status(500).json({ error: e.message || String(e) });
     }
   });
 `;
 
-if (!code.includes('/api/gemini/podcast-script')) {
-  code = code.replace("app.post('/api/gemini/fullpost',", podcastEndpoint.trim() + "\n\n  app.post('/api/gemini/fullpost',");
+if (!code.includes('/api/gemini/video-pitches')) {
+  code = code.replace(
+    "app.post('/api/gemini/video', async (req, res) => {",
+    newEndpoints + "\n  app.post('/api/gemini/video', async (req, res) => {"
+  );
   fs.writeFileSync('server.ts', code);
-  console.log('Added podcast endpoint to server.ts');
+  console.log('Endpoints added to server.ts');
 } else {
-  console.log('Podcast endpoint already exists');
+  console.log('Endpoints already exist.');
 }
